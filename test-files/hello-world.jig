@@ -1,6 +1,8 @@
-print "Hello world!!"
+# var hello_world: string = "Hello world!!"
+# print hello_world
 print "I can even print two lines!"
 prin "Look "
 prin "at "
 prin "me "
 print "go!"
+# print hello_world

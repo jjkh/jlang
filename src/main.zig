@@ -45,15 +45,19 @@ pub fn main() !void {
     var ast = Ast.init(alloc);
     defer ast.deinit();
 
+    var timer = try std.time.Timer.start();
     const input_reader = input_file.reader();
     while (try input_reader.readUntilDelimiterOrEofAlloc(alloc, '\n', 10_000)) |line| {
         defer alloc.free(line);
         try ast.parse_line(line);
     }
+    const elapsed_ns = timer.read();
+    std.log.info("compiled in {d}s", .{@as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s});
 
     const il_writer = il_file.writer();
     try il_writer.print(".assembly '{s}' {{}}\n", .{input_stem});
     try ast.dump(il_writer);
 
     std.debug.print("to build for macos:\n\tdotnet publish -r osx-arm64 \"{s}/{s}\"\n", .{ args[2], ilproj_filename });
+    std.debug.print("to run on .NET runtime:\n\tdotnet run --project \"{s}/{s}\"\n", .{ args[2], ilproj_filename });
 }

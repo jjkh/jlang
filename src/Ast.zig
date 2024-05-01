@@ -7,6 +7,11 @@ lines: std.ArrayList([]const u8),
 
 var tab_depth: u8 = 0;
 
+const keywords = std.StaticStringMap(void).initComptime(.{
+    .{ "prin", {} },
+    .{ "print", {} },
+});
+
 const clr_mapping = std.StaticStringMap([]const u8).initComptime(.{
     .{ "prin", "[mscorlib]System.Console::Write" },
     .{ "print", "[mscorlib]System.Console::WriteLine" },
@@ -24,34 +29,50 @@ const Type = enum {
     }
 };
 
-const Token = union(Type) {
-    void: void,
+const LiteralValue = union(Type) {
+    void,
     string: []const u8,
 
-    pub fn managed_load(self: Token, writer: anytype) !void {
+    pub fn managed_load(self: LiteralValue, writer: anytype) !void {
         switch (self) {
             .void => return error.CannotLoadVoid,
-            .string => |str| try writer.print("ldstr \"{s}\"\n", .{str}),
+            .string => |s| try writer.print("ldstr \"{s}\"\n", .{s}),
         }
     }
 };
+
+const Token = union(enum) {
+    comment,
+    keyword: []const u8,
+    literal: LiteralValue,
+    // identifier: []const u8,
+};
 const Expression = union(enum) {
-    clr_call: struct { func: []const u8, args: []const Token, ret_type: Type },
+    call: struct { func: []const u8, args: []const Token, ret_type: Type },
 
     pub fn dump(self: Expression, writer: anytype) !void {
         switch (self) {
-            .clr_call => |e| {
-                for (e.args) |arg| {
-                    try indent(writer);
-                    try arg.managed_load(writer);
-                }
+            .call => |e| {
+                for (e.args) |arg| switch (arg) {
+                    .literal => |l| {
+                        try indent(writer);
+                        try l.managed_load(writer);
+                    },
+                    else => return error.Unimplemented,
+                };
                 try indent(writer);
-                try writer.print("call {s} {s}(", .{ e.ret_type.managed_type(), e.func });
-                for (0.., e.args) |i, arg| {
-                    try writer.writeAll(@as(Type, arg).managed_type());
-                    if (i < (e.args.len - 1))
-                        try writer.writeAll(", ");
-                }
+
+                try writer.print("call {s} {s}(", .{
+                    e.ret_type.managed_type(),
+                    clr_mapping.get(e.func) orelse e.func,
+                });
+                for (0.., e.args) |i, arg| switch (arg) {
+                    .literal => |l| {
+                        try writer.writeAll(@as(Type, l).managed_type());
+                        if (i < (e.args.len - 1)) try writer.writeAll(", ");
+                    },
+                    else => return error.Unimplemented,
+                };
                 try writer.writeAll(")\n");
             },
         }
@@ -59,7 +80,7 @@ const Expression = union(enum) {
 
     pub fn free(self: Expression, alloc: std.mem.Allocator) void {
         switch (self) {
-            .clr_call => |e| alloc.free(e.args),
+            .call => |e| alloc.free(e.args),
         }
     }
 };
@@ -81,19 +102,23 @@ pub fn deinit(self: *Self) void {
 
 const ExpressionParser = struct {
     buf: []const u8,
-    idx: usize = 0,
+    next_idx: usize = 0,
 
     fn peek(self: ExpressionParser) ?u8 {
-        if (self.idx < self.buf.len - 1)
-            return self.buf[self.idx + 1]
+        if (self.next_idx < self.buf.len)
+            return self.buf[self.next_idx]
         else
             return null;
     }
 
     fn consume(self: *ExpressionParser) ?u8 {
         const char = self.peek() orelse return null;
-        self.idx += 1;
+        self.next_idx += 1;
         return char;
+    }
+
+    fn consume_all(self: *ExpressionParser) void {
+        self.next_idx = self.buf.len;
     }
 
     fn consume_one(self: *ExpressionParser, char: u8) !void {
@@ -105,82 +130,105 @@ const ExpressionParser = struct {
     fn consume_while(self: *ExpressionParser, char: u8) void {
         while (self.consume()) |next_char| {
             if (next_char != char) {
-                self.idx -= 1;
+                self.next_idx -= 1;
                 break;
             }
         }
     }
 
-    fn consume_until(self: *ExpressionParser, char: u8) !void {
-        while (self.consume()) |next_char| {
-            if (next_char == char)
-                return;
+    fn consume_until_or_eob(self: *ExpressionParser, term: u8) []const u8 {
+        const start = self.next_idx;
+        while (self.peek()) |c| {
+            if (c == term) break;
+            self.next_idx += 1;
         }
-        return error.EndOfBuffer;
+        return self.buf[start..self.next_idx];
     }
 
-    fn read_string(self: *ExpressionParser) ![]const u8 {
+    fn consume_until(self: *ExpressionParser, term: u8) ![]const u8 {
+        const consumed = self.consume_until_or_eob(term);
+        if (self.peek() == null) {
+            return error.EndOfBuffer;
+        }
+        return consumed;
+    }
+
+    fn consume_string_literal(self: *ExpressionParser) ![]const u8 {
         try self.consume_one('"');
-
-        const start_idx = self.idx + 1; // why?
-        try self.consume_until('"');
-        return self.buf[start_idx..self.idx];
-    }
-
-    fn read_identifier(self: *ExpressionParser) ![]const u8 {
-        const start_idx = self.idx;
-        try self.consume_until(' ');
-        return self.buf[start_idx..self.idx];
+        const str = try self.consume_until('"');
+        try self.consume_one('"');
+        return str;
     }
 
     fn read_token(self: *ExpressionParser) !Token {
         if (self.peek()) |next_char| {
-            if (next_char == '"')
-                return Token{ .string = try self.read_string() }
-            else
-                return error.InvalidCharForToken;
-        }
-        return error.EndOfBuffer;
+            return switch (next_char) {
+                '"' => .{ .literal = .{ .string = try self.consume_string_literal() } },
+                '#' => .{ .comment = self.consume_all() },
+                'a'...'z', 'A'...'Z', '_' => .{ .keyword = self.consume_until_or_eob(' ') },
+                else => error.InvalidFirstCharForToken,
+            };
+        } else return error.EndOfBuffer;
     }
 
-    pub fn parse(self: *ExpressionParser, alloc: std.mem.Allocator) !Expression {
-        const identifier = try self.read_identifier();
-        self.consume_while(' ');
-        const tokens = try alloc.alloc(Token, 1);
-        errdefer alloc.free(tokens);
-        tokens[0] = try self.read_token();
-        if (self.peek() != null) {
-            return error.NotImplemented;
+    pub fn parse(self: *ExpressionParser, alloc: std.mem.Allocator) !?Expression {
+        var tokenList = std.ArrayList(Token).init(alloc);
+        defer tokenList.deinit();
+
+        while (self.peek() != null) {
+            try tokenList.append(try self.read_token());
+            // all tokens separated with whitespace (for now)
+            self.consume_while(' ');
+        }
+        if (tokenList.items.len == 0)
+            return null; // empty line
+
+        switch (tokenList.items[0]) {
+            // if the first token is a comment, ignore the line
+            .comment => return null,
+            // cannot start an expression with a literal
+            .literal => return error.SyntaxError,
+            else => {},
         }
 
-        // TODO: all of this
-        return Expression{ .clr_call = .{
-            .func = clr_mapping.get(identifier) orelse return error.InvalidClrMethod,
-            .args = tokens,
-            .ret_type = .void,
-        } };
+        if (keywords.getIndex(tokenList.items[0].keyword)) |kw_i| {
+            return .{ .call = .{
+                .func = keywords.keys()[kw_i],
+                .args = try alloc.dupe(Token, tokenList.items[1..]),
+                .ret_type = .void,
+            } };
+        } else {
+            // TODO: implement everything else
+            return error.Unimplemented;
+        }
     }
 };
 
-test "ExpressionParser" {
+test "ExpressionParser call" {
     var parser = ExpressionParser{ .buf = "print \"Hello World!\"" };
-    const expr = try parser.parse();
+    const expr = (try parser.parse(std.testing.allocator)) orelse return error.Fail;
+    defer expr.free(std.testing.allocator);
 
     var buf: [2000]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     try expr.dump(fbs.writer());
 
     try std.testing.expectEqualStrings(
-        \\ldstr "Hello World"
+        \\ldstr "Hello World!"
         \\call void [mscorlib]System.Console::WriteLine(string)
         \\
     , fbs.getWritten());
 }
 
+test "ExpressionParser comment" {
+    var parser = ExpressionParser{ .buf = "# print \"Hello World!\"" };
+    try std.testing.expectEqual(null, try parser.parse(std.testing.allocator));
+}
+
 pub fn parse_line(self: *Self, line: []const u8) !void {
     try self.lines.append(try self.alloc.dupe(u8, line));
     var parser = ExpressionParser{ .buf = self.lines.getLast() };
-    try self.expressions.append(try parser.parse(self.alloc));
+    try self.expressions.append(try parser.parse(self.alloc) orelse return);
 }
 
 fn indent(writer: anytype) !void {
@@ -214,13 +262,11 @@ test "clr_mapping" {
     var ast = init(std.testing.allocator);
     defer ast.deinit();
 
-    try ast.expressions.append(.{
-        .clr_call = .{
-            .func = "[mscorlib]System.Console::WriteLine",
-            .args = &[_]Token{.{ .string = "Hello World!" }},
-            .ret_type = .void,
-        },
-    });
+    // TODO: this is a footgun
+    var tokens = try std.testing.allocator.alloc(Token, 1);
+    tokens[0] = .{ .literal = .{ .string = "Hello World!" } };
+
+    try ast.expressions.append(.{ .call = .{ .func = "print", .args = tokens, .ret_type = .void } });
 
     var buf: [2000]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
