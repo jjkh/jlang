@@ -29,24 +29,48 @@ const Type = enum {
     }
 };
 
-const LiteralValue = union(Type) {
+const Value = union(Type) {
     void,
     string: []const u8,
 
-    pub fn managed_load(self: LiteralValue, writer: anytype) !void {
+    pub fn init(alloc: std.mem.Allocator, ty: Type, value: anytype) !Value {
+        return switch (ty) {
+            .void => return error.CannotInitVoid,
+            .string => return .{ .string = try alloc.dupe(u8, value) },
+        };
+    }
+
+    pub fn deinit(self: Value, alloc: std.mem.Allocator) void {
         switch (self) {
-            .void => return error.CannotLoadVoid,
+            .void => unreachable,
+            .string => |s| alloc.free(s),
+        }
+    }
+};
+
+const Literal = struct {
+    value: Value,
+
+    pub fn managed_load(self: Literal, writer: anytype) !void {
+        switch (self.value) {
+            .void => unreachable,
             .string => |s| try writer.print("ldstr \"{s}\"\n", .{s}),
         }
     }
 };
 
+const Variable = struct {
+    identifier: ?[]const u8,
+    value: Value,
+};
+
 const Token = union(enum) {
     comment,
     keyword: []const u8,
-    literal: LiteralValue,
+    literal: Literal,
     // identifier: []const u8,
 };
+
 const Expression = union(enum) {
     call: struct { func: []const u8, args: []const Token, ret_type: Type },
 
@@ -68,7 +92,7 @@ const Expression = union(enum) {
                 });
                 for (0.., e.args) |i, arg| switch (arg) {
                     .literal => |l| {
-                        try writer.writeAll(@as(Type, l).managed_type());
+                        try writer.writeAll(@as(Type, l.value).managed_type());
                         if (i < (e.args.len - 1)) try writer.writeAll(", ");
                     },
                     else => return error.Unimplemented,
@@ -80,7 +104,13 @@ const Expression = union(enum) {
 
     pub fn free(self: Expression, alloc: std.mem.Allocator) void {
         switch (self) {
-            .call => |e| alloc.free(e.args),
+            .call => |e| {
+                for (e.args) |arg| switch (arg) {
+                    .comment, .keyword => {},
+                    .literal => |l| l.value.deinit(alloc),
+                };
+                alloc.free(e.args);
+            },
         }
     }
 };
@@ -101,6 +131,7 @@ pub fn deinit(self: *Self) void {
 }
 
 const ExpressionParser = struct {
+alloc: std.mem.Allocator,
     buf: []const u8,
     next_idx: usize = 0,
 
@@ -163,7 +194,11 @@ const ExpressionParser = struct {
     fn read_token(self: *ExpressionParser) !Token {
         if (self.peek()) |next_char| {
             return switch (next_char) {
-                '"' => .{ .literal = .{ .string = try self.consume_string_literal() } },
+                '"' => .{
+                    .literal = .{
+                        .value = try Value.init(self.alloc, .string, try self.consume_string_literal()),
+                    },
+                },
                 '#' => .{ .comment = self.consume_all() },
                 'a'...'z', 'A'...'Z', '_' => .{ .keyword = self.consume_until_or_eob(' ') },
                 else => error.InvalidFirstCharForToken,
@@ -171,8 +206,8 @@ const ExpressionParser = struct {
         } else return error.EndOfBuffer;
     }
 
-    pub fn parse(self: *ExpressionParser, alloc: std.mem.Allocator) !?Expression {
-        var tokenList = std.ArrayList(Token).init(alloc);
+    pub fn parse(self: *ExpressionParser) !?Expression {
+        var tokenList = std.ArrayList(Token).init(self.alloc);
         defer tokenList.deinit();
 
         while (self.peek() != null) {
@@ -194,7 +229,7 @@ const ExpressionParser = struct {
         if (keywords.getIndex(tokenList.items[0].keyword)) |kw_i| {
             return .{ .call = .{
                 .func = keywords.keys()[kw_i],
-                .args = try alloc.dupe(Token, tokenList.items[1..]),
+                .args = try self.alloc.dupe(Token, tokenList.items[1..]),
                 .ret_type = .void,
             } };
         } else {
@@ -205,8 +240,8 @@ const ExpressionParser = struct {
 };
 
 test "ExpressionParser call" {
-    var parser = ExpressionParser{ .buf = "print \"Hello World!\"" };
-    const expr = (try parser.parse(std.testing.allocator)) orelse return error.Fail;
+    var parser = ExpressionParser{ .alloc = std.testing.allocator, .buf = "print \"Hello World!\"" };
+    const expr = (try parser.parse()) orelse return error.Fail;
     defer expr.free(std.testing.allocator);
 
     var buf: [2000]u8 = undefined;
@@ -221,14 +256,14 @@ test "ExpressionParser call" {
 }
 
 test "ExpressionParser comment" {
-    var parser = ExpressionParser{ .buf = "# print \"Hello World!\"" };
-    try std.testing.expectEqual(null, try parser.parse(std.testing.allocator));
+    var parser = ExpressionParser{ .alloc = std.testing.allocator, .buf = "# print \"Hello World!\"" };
+    try std.testing.expectEqual(null, try parser.parse());
 }
 
 pub fn parse_line(self: *Self, line: []const u8) !void {
     try self.lines.append(try self.alloc.dupe(u8, line));
-    var parser = ExpressionParser{ .buf = self.lines.getLast() };
-    try self.expressions.append(try parser.parse(self.alloc) orelse return);
+    var parser = ExpressionParser{ .alloc = self.alloc, .buf = self.lines.getLast() };
+    try self.expressions.append(try parser.parse() orelse return);
 }
 
 fn indent(writer: anytype) !void {
@@ -264,7 +299,7 @@ test "clr_mapping" {
 
     // TODO: this is a footgun
     var tokens = try std.testing.allocator.alloc(Token, 1);
-    tokens[0] = .{ .literal = .{ .string = "Hello World!" } };
+    tokens[0] = .{ .literal = .{ .value = try Value.init(std.testing.allocator, .string, "Hello World!") } };
 
     try ast.expressions.append(.{ .call = .{ .func = "print", .args = tokens, .ret_type = .void } });
 
