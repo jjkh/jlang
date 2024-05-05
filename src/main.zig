@@ -1,5 +1,8 @@
 const std = @import("std");
-const Ast = @import("Ast.zig");
+
+const tokenIterator = @import("tokenizer.zig").tokenIterator;
+const expressionIterator = @import("ast.zig").expressionIterator;
+const codeGenerator = @import("codegen.zig").codeGenerator;
 
 const ilproj_data =
     \\<Project Sdk="Microsoft.Net.Sdk.il/8.0.0">
@@ -42,21 +45,25 @@ pub fn main() !void {
     const il_file = try out_dir.createFile(il_filename, .{});
     defer il_file.close();
 
-    var ast = Ast.init(alloc);
-    defer ast.deinit();
-
     var timer = try std.time.Timer.start();
     const input_reader = input_file.reader();
-    while (try input_reader.readUntilDelimiterOrEofAlloc(alloc, '\n', 10_000)) |line| {
-        defer alloc.free(line);
-        try ast.parse_line(line);
+    const token_it = tokenIterator(alloc, input_reader);
+    var expression_it = expressionIterator(alloc, token_it);
+
+    {
+        const il_writer = il_file.writer();
+        try il_writer.print(".assembly '{s}' {{}}\n", .{input_stem});
+
+        var code_generator = try codeGenerator(il_writer);
+        defer code_generator.deinit();
+        while (try expression_it.next()) |expr| {
+            defer expr.free(alloc);
+            try code_generator.writeExpr(expr);
+        }
     }
+
     const elapsed_ns = timer.read();
     std.log.info("compiled in {d}s", .{@as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s});
-
-    const il_writer = il_file.writer();
-    try il_writer.print(".assembly '{s}' {{}}\n", .{input_stem});
-    try ast.dump(il_writer);
 
     std.debug.print("to build for macos:\n\tdotnet publish -r osx-arm64 \"{s}/{s}\"\n", .{ args[2], ilproj_filename });
     std.debug.print("to run on .NET runtime:\n\tdotnet run --project \"{s}/{s}\"\n", .{ args[2], ilproj_filename });

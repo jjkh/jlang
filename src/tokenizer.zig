@@ -8,7 +8,7 @@ const peekReader = @import("helpers/peek_reader.zig").peekReader;
 
 pub const Type = enum {
     void,
-    int,
+    int32,
     string,
 };
 
@@ -24,7 +24,7 @@ pub const Token = union(enum) {
     };
     pub const Literal = union(Type) {
         void,
-        int: i32,
+        int32: i32,
         string: []const u8,
 
         pub fn free(self: Literal, alloc: Allocator) void {
@@ -37,7 +37,7 @@ pub const Token = union(enum) {
         pub fn prettyPrint(self: Literal, writer: anytype) !void {
             try switch (self) {
                 .void => writer.writeAll("{}"),
-                .int => |i| writer.print("{}", .{i}),
+                .int32 => |i| writer.print("{}", .{i}),
                 .string => |s| writer.print("\"{s}\"", .{s}),
             };
         }
@@ -159,7 +159,7 @@ pub fn TokenIterator(comptime ReaderType: type) type {
 
             return if (try self.peeker.peekByte()) |c| switch (c) {
                 '"' => .{ .literal = .{ .string = try self.takeStringLiteral() } },
-                '-', '0'...'9' => .{ .literal = .{ .int = try self.takeIntLiteral() } },
+                '-', '0'...'9' => .{ .literal = .{ .int32 = try self.takeIntLiteral() } },
                 '_', 'a'...'z', 'A'...'Z' => blk: {
                     const identifier = try self.takeIdentifier();
                     errdefer self.alloc.free(identifier);
@@ -208,15 +208,15 @@ test "TokenIterator" {
 
     try std.testing.expectEqualDeep(&[_]Token{
         .{ .literal = .{ .string = "test" } },
-        .{ .literal = .{ .int = 1 } },
+        .{ .literal = .{ .int32 = 1 } },
         .{ .symbol = .semicolon },
-        .{ .literal = .{ .int = -2345678 } },
+        .{ .literal = .{ .int32 = -2345678 } },
         .{ .literal = .{ .string = "test 2" } },
         .{ .keyword = .prin },
         .{ .literal = .{ .string = "test 3, " } },
         .{ .keyword = .print },
         .{ .literal = .{ .string = "test " } },
-        .{ .literal = .{ .int = 4 } },
+        .{ .literal = .{ .int32 = 4 } },
     }, token_list.items);
 
     try std.testing.expectEqual(null, try ts.next());

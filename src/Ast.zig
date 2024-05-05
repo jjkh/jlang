@@ -7,18 +7,18 @@ const Token = @import("tokenizer.zig").Token;
 
 const Type = enum {
     void,
-    int,
+    int32,
     string,
 
     pub fn from_literal(literal: Token.Literal) Type {
         return switch (literal) {
-            .int => .int,
+            .int32 => .int32,
             .string => .string,
         };
     }
 };
 
-const Expression = union(enum) {
+pub const Expression = union(enum) {
     call: Call,
 
     const Call = struct {
@@ -139,9 +139,10 @@ test "ExpressionIterator" {
         .{ .keyword = .prin },
         .{ .literal = .{ .string = try std.testing.allocator.dupe(u8, "test ") } },
         .{ .symbol = .semicolon },
+
         .{ .keyword = .print },
         .{ .literal = .{ .string = try std.testing.allocator.dupe(u8, "{0}!") } },
-        .{ .literal = .{ .int = 4 } },
+        .{ .literal = .{ .int32 = 4 } },
         .{ .symbol = .semicolon },
     });
     var expression_it = expressionIterator(std.testing.allocator, token_it);
@@ -163,7 +164,7 @@ test "ExpressionIterator" {
             .func = "[mscorlib]System.Console::WriteLine",
             .args = &[_]Token{
                 .{ .literal = .{ .string = "{0}!" } },
-                .{ .literal = .{ .int = 4 } },
+                .{ .literal = .{ .int32 = 4 } },
             },
         } }, expr);
     }
