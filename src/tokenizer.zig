@@ -6,25 +6,26 @@ const assert = std.debug.assert;
 const PeekReader = @import("helpers/peek_reader.zig").PeekReader;
 const peekReader = @import("helpers/peek_reader.zig").peekReader;
 
+pub const Type = enum {
+    void,
+    int,
+    string,
+};
+
 pub const Token = union(enum) {
     keyword: Keyword,
     literal: Literal,
 
-    pub const Keyword = enum { prin, print };
-    const keywords = std.StaticStringMap(Keyword).initComptime(.{
-        .{ "prin", .prin },
-        .{ "print", .print },
-    });
-
-    pub const Literal = union(enum) {
+    pub const Keyword = enum {
+        prin,
+        print,
+    };
+    pub const Literal = union(Type) {
+        void,
         int: i32,
         string: []const u8,
 
-        pub fn fromString(alloc: Allocator, str: []const u8) !Literal {
-            return .{ .string = try alloc.dupe(u8, str) };
-        }
-
-        pub fn free(self: *Literal, alloc: Allocator) void {
+        pub fn free(self: Literal, alloc: Allocator) void {
             switch (self) {
                 .string => alloc.free(self.string),
                 else => {},
@@ -33,11 +34,23 @@ pub const Token = union(enum) {
 
         pub fn prettyPrint(self: Literal, writer: anytype) !void {
             try switch (self) {
+                .void => writer.writeAll("{}"),
                 .int => |i| writer.print("{}", .{i}),
                 .string => |s| writer.print("\"{s}\"", .{s}),
             };
         }
     };
+    const keywords = std.StaticStringMap(Keyword).initComptime(.{
+        .{ "prin", .prin },
+        .{ "print", .print },
+    });
+
+    pub fn free(self: Token, alloc: Allocator) void {
+        switch (self) {
+            .literal => |l| l.free(alloc),
+            else => {},
+        }
+    }
 
     pub fn prettyPrint(self: Token, writer: anytype) !void {
         try switch (self) {
@@ -84,7 +97,7 @@ pub fn TokenIterator(comptime ReaderType: type) type {
         }
 
         fn takeIntLiteral(self: *Self) !i32 {
-            var int_bytes = try std.BoundedArray(u8, 11).init(0);
+            var int_bytes: std.BoundedArray(u8, 11) = .{};
             const first_byte = try self.peeker.reader().readByte();
             assert(switch (first_byte) {
                 '-', '0'...'9' => true,
@@ -95,7 +108,7 @@ pub fn TokenIterator(comptime ReaderType: type) type {
             while (try self.peeker.peekByte()) |c| switch (c) {
                 '0'...'9' => try int_bytes.append(try self.peeker.reader().readByte()),
                 '_' => try self.peeker.reader().skipBytes(1, .{}),
-                'a'...'z' => return error.InvalidIntCharacter,
+                'a'...'z', 'A'...'Z', '"' => return error.InvalidIntCharacter,
                 else => break,
             };
 
@@ -139,11 +152,11 @@ pub fn TokenIterator(comptime ReaderType: type) type {
                 '-', '0'...'9' => .{ .literal = .{ .int = try self.takeIntLiteral() } },
                 '_', 'a'...'z', 'A'...'Z' => blk: {
                     const identifier = try self.takeIdentifier();
-                    defer self.alloc.free(identifier);
-                    if (Token.keywords.get(identifier)) |keyword|
-                        break :blk .{ .keyword = keyword }
-                    else
-                        return error.Unimplemented;
+                    errdefer self.alloc.free(identifier);
+                    if (Token.keywords.get(identifier)) |keyword| {
+                        self.alloc.free(identifier);
+                        break :blk .{ .keyword = keyword };
+                    } else return error.Unimplemented;
                 },
                 else => error.InvalidChar,
             } else null;
@@ -158,7 +171,7 @@ pub fn tokenIterator(alloc: Allocator, reader: anytype) TokenIterator(@TypeOf(re
     };
 }
 
-test "TokenStream" {
+test "TokenIterator" {
     var fbs = std.io.fixedBufferStream(
         \\"test" 1# hello there
         \\# comment 12
@@ -172,14 +185,8 @@ test "TokenStream" {
 
     var token_list = ArrayList(Token).init(std.testing.allocator);
     defer {
-        for (token_list.items) |token| switch (token) {
-            .literal => |l| switch (l) {
-                .string => |s| std.testing.allocator.free(s),
-                else => {},
-            },
-            else => {},
-        };
-        defer token_list.deinit();
+        for (token_list.items) |token| token.free(std.testing.allocator);
+        token_list.deinit();
     }
 
     while (try ts.next()) |token|
