@@ -68,10 +68,16 @@ pub fn ExpressionIterator(comptime TokenIteratorType: type) type {
             var args_list = ArrayList(Token).init(self.alloc);
             errdefer for (args_list.items) |arg| arg.free(self.token_it.alloc);
             while (try self.peekToken()) |token| switch (token) {
-                .literal => try args_list.append((try self.getToken()).?),
-                .keyword => break,
-                // else => return error.UnexpectedToken,
-            };
+                .literal => try args_list.append((self.getToken() catch unreachable).?),
+                .symbol => |s| switch (s) {
+                    .semicolon => {
+                        _ = self.getToken() catch unreachable;
+                        break;
+                    },
+                    // else => return error.UnexpectedSymbol
+                },
+                else => return error.UnexpectedToken,
+            } else return error.UnexpectedEndOfTokens;
 
             expr.args = try args_list.toOwnedSlice();
             return expr;
@@ -132,9 +138,11 @@ test "ExpressionIterator" {
     const token_it = FakeTokenIterator.init(std.testing.allocator, &[_]Token{
         .{ .keyword = .prin },
         .{ .literal = .{ .string = try std.testing.allocator.dupe(u8, "test ") } },
+        .{ .symbol = .semicolon },
         .{ .keyword = .print },
         .{ .literal = .{ .string = try std.testing.allocator.dupe(u8, "{0}!") } },
         .{ .literal = .{ .int = 4 } },
+        .{ .symbol = .semicolon },
     });
     var expression_it = expressionIterator(std.testing.allocator, token_it);
 

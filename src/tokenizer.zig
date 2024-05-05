@@ -13,9 +13,11 @@ pub const Type = enum {
 };
 
 pub const Token = union(enum) {
+    symbol: Symbol,
     keyword: Keyword,
     literal: Literal,
 
+    pub const Symbol = enum { semicolon };
     pub const Keyword = enum {
         prin,
         print,
@@ -54,6 +56,7 @@ pub const Token = union(enum) {
 
     pub fn prettyPrint(self: Token, writer: anytype) !void {
         try switch (self) {
+            .symbol => |s| writer.print("<{s}>", .{@tagName(s)}),
             .keyword => |k| writer.print("{s}", .{@tagName(k)}),
             .literal => |l| l.prettyPrint(writer),
         };
@@ -76,6 +79,13 @@ test "pretty print token" {
         const literal = Token{ .literal = .{ .string = "hello there" } };
         try literal.prettyPrint(fbs.writer());
         try std.testing.expectEqualStrings("\"hello there\"", fbs.getWritten());
+    }
+
+    fbs.reset();
+    {
+        const literal = Token{ .symbol = .semicolon };
+        try literal.prettyPrint(fbs.writer());
+        try std.testing.expectEqualStrings("<semicolon>", fbs.getWritten());
     }
 }
 
@@ -158,6 +168,10 @@ pub fn TokenIterator(comptime ReaderType: type) type {
                         break :blk .{ .keyword = keyword };
                     } else return error.Unimplemented;
                 },
+                ';' => blk: {
+                    self.peeker.reader().skipBytes(1, .{}) catch unreachable;
+                    break :blk .{ .symbol = .semicolon };
+                },
                 else => error.InvalidChar,
             } else null;
         }
@@ -173,7 +187,7 @@ pub fn tokenIterator(alloc: Allocator, reader: anytype) TokenIterator(@TypeOf(re
 
 test "TokenIterator" {
     var fbs = std.io.fixedBufferStream(
-        \\"test" 1# hello there
+        \\"test" 1; # hello there;
         \\# comment 12
         \\
         \\-2_345_678 "test 2"
@@ -195,6 +209,7 @@ test "TokenIterator" {
     try std.testing.expectEqualDeep(&[_]Token{
         .{ .literal = .{ .string = "test" } },
         .{ .literal = .{ .int = 1 } },
+        .{ .symbol = .semicolon },
         .{ .literal = .{ .int = -2345678 } },
         .{ .literal = .{ .string = "test 2" } },
         .{ .keyword = .prin },
