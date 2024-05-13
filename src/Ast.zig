@@ -5,43 +5,42 @@ const ArrayList = std.ArrayList;
 
 const Token = @import("tokenizer.zig").Token;
 
-const Type = enum {
-    void,
-    int32,
-    string,
-
-    pub fn from_literal(literal: Token.Literal) Type {
-        return switch (literal) {
-            .int32 => .int32,
-            .string => .string,
-        };
-    }
+pub const Type = struct {
+    name: []const u8,
+    base_type: union(enum) { void, value, reference: []const u8 } = .void,
+    clr_name: ?[]const u8 = null,
+    assembly: ?[]const u8 = null,
 };
+
+// TODO this is obviously wrong...
+pub const AstLiteral = struct {
+    value: Token.Literal,
+    ty: Type,
+};
+
+// TODO allow custom types
+pub const builtin_types = std.StaticStringMap(Type).initComptime(.{
+    // zig fmt: off
+    .{ "void"  , .{ .name = "void"                                                             , .base_type = .void } },
+    .{ "object", .{ .name = "object", .clr_name = "System.Object", .assembly = "System.Runtime", .base_type = .{ .reference = "void" },  } },
+    .{ "int"   , .{ .name = "int"   , .clr_name = "System.Int32" , .assembly = "System.Runtime", .base_type = .value,  } },
+    .{ "string", .{ .name = "string", .clr_name = "System.String", .assembly = "System.Runtime", .base_type = .{ .reference = "object" },  } },
+    // zig fmt: on
+});
 
 pub const Expression = union(enum) {
     call: Call,
 
     const Call = struct {
         func: []const u8,
-        args: []const Token = undefined,
-        ret_type: Type = undefined,
+        args: []const AstLiteral = undefined,
 
         pub fn from_builtin(keyword: Token.Keyword) ?Call {
-            return switch (keyword) {
-                .prin => .{
-                    .func = "[mscorlib]System.Console::Write",
-                    .ret_type = .void,
-                },
-                .print => .{
-                    .func = "[mscorlib]System.Console::WriteLine",
-                    .ret_type = .void,
-                },
-                // else => null,
-            };
+            return .{ .func = @tagName(keyword)};
         }
 
         pub fn free(self: Call, alloc: Allocator) void {
-            for (self.args) |arg| arg.free(alloc);
+            for (self.args) |arg| arg.value.free(alloc);
             alloc.free(self.args);
         }
     };
@@ -65,10 +64,18 @@ pub fn ExpressionIterator(comptime TokenIteratorType: type) type {
             var expr = Expression.Call.from_builtin((try self.getToken()).?.keyword) orelse
                 return error.UnexpectedKeyword;
 
-            var args_list = ArrayList(Token).init(self.alloc);
-            errdefer for (args_list.items) |arg| arg.free(self.token_it.alloc);
+            var args_list = ArrayList(AstLiteral).init(self.alloc);
+            errdefer for (args_list.items) |arg| arg.value.free(self.token_it.alloc);
             while (try self.peekToken()) |token| switch (token) {
-                .literal => try args_list.append((self.getToken() catch unreachable).?),
+                .literal => {
+                    const tok = (self.getToken() catch unreachable).?;
+                    const ty = switch (tok.literal) {
+                        .int32 => builtin_types.get("int").?,
+                        .string => builtin_types.get("string").?,
+                        .void => undefined, // invalid
+                    };
+                    try args_list.append(.{ .ty = ty, .value = tok.literal });
+                },
                 .symbol => |s| switch (s) {
                     .semicolon => {
                         _ = self.getToken() catch unreachable;
@@ -151,9 +158,9 @@ test "ExpressionIterator" {
         const expr = (try expression_it.next()).?;
         defer expr.free(std.testing.allocator);
         try std.testing.expectEqualDeep(Expression{ .call = .{
-            .func = "[mscorlib]System.Console::Write",
-            .args = &[_]Token{
-                .{ .literal = .{ .string = "test " } },
+            .func = "prin",
+            .args = &[_]AstLiteral{
+                .{ .ty = builtin_types.get("string").?, .value = .{ .string = "test " } }
             },
         } }, expr);
     }
@@ -161,10 +168,10 @@ test "ExpressionIterator" {
         const expr = (try expression_it.next()).?;
         defer expr.free(std.testing.allocator);
         try std.testing.expectEqualDeep(Expression{ .call = .{
-            .func = "[mscorlib]System.Console::WriteLine",
-            .args = &[_]Token{
-                .{ .literal = .{ .string = "{0}!" } },
-                .{ .literal = .{ .int32 = 4 } },
+            .func = "print",
+            .args = &[_]AstLiteral{
+                .{ .ty = builtin_types.get("string").?, .value = .{ .string = "{0}!" } },
+                .{ .ty = builtin_types.get("int").?, .value = .{ .int32 = 4 } },
             },
         } }, expr);
     }
