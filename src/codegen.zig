@@ -170,6 +170,14 @@ pub fn CodeGenerator(comptime WriterType: type) type {
                     }
                     try self.writer.writeAll(")\n");
                 },
+                .binding => |b| {
+                    _ = b; // autofix
+
+                },
+                .assignment => |a| {
+                    _ = a; // autofix
+
+                },
             }
         }
 

@@ -16,12 +16,20 @@ pub const Token = union(enum) {
     symbol: Symbol,
     keyword: Keyword,
     literal: Literal,
+    identifier: []const u8,
 
-    pub const Symbol = enum { semicolon };
+    pub const Symbol = enum {
+        semicolon,
+        colon,
+        equals,
+    };
     pub const Keyword = enum {
+        let,
+        set,
         prin,
         print,
     };
+
     pub const Literal = union(Type) {
         void,
         int32: i32,
@@ -42,7 +50,10 @@ pub const Token = union(enum) {
             };
         }
     };
+
     const keywords = std.StaticStringMap(Keyword).initComptime(.{
+        .{ "let", .let },
+        .{ "set", .set },
         .{ "prin", .prin },
         .{ "print", .print },
     });
@@ -50,6 +61,7 @@ pub const Token = union(enum) {
     pub fn free(self: Token, alloc: Allocator) void {
         switch (self) {
             .literal => |l| l.free(alloc),
+            .identifier => |s| alloc.free(s),
             else => {},
         }
     }
@@ -59,6 +71,7 @@ pub const Token = union(enum) {
             .symbol => |s| writer.print("<{s}>", .{@tagName(s)}),
             .keyword => |k| writer.print("{s}", .{@tagName(k)}),
             .literal => |l| l.prettyPrint(writer),
+            .identifier => |i| writer.writeAll(i),
         };
     }
 };
@@ -87,6 +100,13 @@ test "pretty print token" {
         try literal.prettyPrint(fbs.writer());
         try std.testing.expectEqualStrings("<semicolon>", fbs.getWritten());
     }
+
+    fbs.reset();
+    {
+        const literal = Token{ .identifier = "test" };
+        try literal.prettyPrint(fbs.writer());
+        try std.testing.expectEqualStrings("test", fbs.getWritten());
+    }
 }
 
 pub fn TokenIterator(comptime ReaderType: type) type {
@@ -95,6 +115,10 @@ pub fn TokenIterator(comptime ReaderType: type) type {
         alloc: Allocator,
 
         const Self = @This();
+
+        fn skip(self: *Self, amount: usize) void {
+            self.peeker.reader().skipBytes(amount, .{}) catch unreachable;
+        }
 
         fn takeStringLiteral(self: *Self) ![]const u8 {
             assert(try self.peeker.reader().readByte() == '"');
@@ -166,11 +190,18 @@ pub fn TokenIterator(comptime ReaderType: type) type {
                     if (Token.keywords.get(identifier)) |keyword| {
                         self.alloc.free(identifier);
                         break :blk .{ .keyword = keyword };
-                    } else return error.Unimplemented;
+                    } else {
+                        break :blk .{ .identifier = identifier };
+                    }
                 },
-                ';' => blk: {
-                    self.peeker.reader().skipBytes(1, .{}) catch unreachable;
-                    break :blk .{ .symbol = .semicolon };
+                ';', ':', '=' => blk: {
+                    self.skip(1);
+                    break :blk .{ .symbol = switch (c) {
+                        ';' => .semicolon,
+                        ':' => .colon,
+                        '=' => .equals,
+                        else => unreachable,
+                    } };
                 },
                 else => error.InvalidChar,
             } else null;
@@ -194,6 +225,8 @@ test "TokenIterator" {
         \\   # "string in comment"
         \\prin "test 3, " # first print
         \\print "test " 4
+        \\let x: string = "abc";
+        \\set y = 123;
     );
     var ts = tokenIterator(std.testing.allocator, fbs.reader());
 
@@ -207,16 +240,34 @@ test "TokenIterator" {
         try token_list.append(token);
 
     try std.testing.expectEqualDeep(&[_]Token{
+        // line 1
         .{ .literal = .{ .string = "test" } },
         .{ .literal = .{ .int32 = 1 } },
         .{ .symbol = .semicolon },
+        // line 2
         .{ .literal = .{ .int32 = -2345678 } },
         .{ .literal = .{ .string = "test 2" } },
+        // line 3
         .{ .keyword = .prin },
         .{ .literal = .{ .string = "test 3, " } },
+        // line 4
         .{ .keyword = .print },
         .{ .literal = .{ .string = "test " } },
         .{ .literal = .{ .int32 = 4 } },
+        // line 5
+        .{ .keyword = .let },
+        .{ .identifier = "x" },
+        .{ .symbol = .colon },
+        .{ .identifier = "string" },
+        .{ .symbol = .equals },
+        .{ .literal = .{ .string = "abc" } },
+        .{ .symbol = .semicolon },
+        // line 6
+        .{ .keyword = .set },
+        .{ .identifier = "y" },
+        .{ .symbol = .equals },
+        .{ .literal = .{ .int32 = 123 } },
+        .{ .symbol = .semicolon },
     }, token_list.items);
 
     try std.testing.expectEqual(null, try ts.next());
